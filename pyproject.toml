@@ -2,7 +2,7 @@
 name = "vibe-data-director"
 version = "0.1.0"
 description = "FastAPI microservice for Dataset Director - Kumo SDK and HuggingFace integration"
-authors = ["Your Name <you@example.com>"]
+authors = ["Your Name <andrew@monostate.ai>"]
 license = "MIT"
 readme = "README.md"
 packages = [{include = "app"}]

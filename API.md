@@ -165,9 +165,22 @@ Response 200:
   "coverage": [
     {"class": "positive", "pred_count": 45},
     {"class": "negative", "pred_count": 38}
+  ],
+  "details": [
+    {
+      "class": "positive",
+      "spec_contributions": [
+        {"spec_id": "positive|formal|0", "pred_count": 2},
+        {"spec_id": "positive|casual|0", "pred_count": 0}
+      ]
+    }
   ]
 }
 ```
+
+Notes:
+- Coverage is computed as the sum of per‑spec predictions for each class.
+- With sparse or very recent data, short‑horizon counts may be 0. The service returns 200 with fallback values instead of failing.
 
 Errors: 401/403, 404
 
@@ -185,8 +198,17 @@ Query params:
 
 Response 200:
 ```json
-{ "spec_ids": ["positive|formal|0", "positive|casual|0"] }
+{
+  "spec_ids": ["positive|formal|0", "positive|casual|0"],
+  "spec_predictions": {
+    "positive|formal|0": 2,
+    "positive|casual|0": 0
+  }
+}
 ```
+
+Notes:
+- `spec_predictions` is optional and contains predicted 10‑minute counts per `spec_id` when available. Clients can sort ascending to fill lowest-coverage specs first. If absent, clients should use a safe fallback ordering.
 
 Errors: 401/403, 404, 422
 
@@ -226,7 +248,35 @@ Errors: 401/403, 404, 422, 500
 - For JSON uploads, use `/session/seed_upload_json` with `rows` as above.
 - Use the `session_id` returned by `/session/init` for all subsequent calls.
 
+### RFM integration details
+- Tables and types: `samples(sample_id ID, ts time, class categorical, style categorical, negation categorical, text text, spec_id ID)`, `specs(spec_id ID, class categorical, style categorical, negation categorical)`, `classes(class ID)`.
+- Graph links: `samples.spec_id → specs.spec_id`, `specs.class → classes.class`, and `samples.class → classes.class`.
+- Coverage: class coverage is computed as the sum of per‑spec `PREDICT COUNT(samples.*, 0, 10, minutes) FOR specs.spec_id = '...'`.
+- Specs ranking: `PREDICT LIST_DISTINCT(specs.spec_id, 0, 1, minutes) FOR classes.class = '...'` (PK-compliant FOR).
+- Temporal window: server spreads `samples.ts` across the last hour to satisfy short‑horizon predictions; if predictions are unavailable, endpoints return 200 with fallback values.
+
 ### Version
 - API version: `0.1.0` (service)
+
+## Endpoint Details
+
+### Authentication and Headers
+- All endpoints except `GET /health` require `Authorization: Bearer <API_KEY>`
+- `Content-Type: application/json` for JSON POSTs
+- Multipart form required for file upload endpoint
+
+### Sessions
+- POST `/session/init`: create a new session and return the spec grid derived from classes, styles, and negation options.
+
+### Uploads
+- POST `/session/seed_upload`: CSV/JSON file upload; requires `session_id` form field
+- POST `/session/seed_upload_json`: inline JSON upload; requires `session_id` and `rows`
+
+### Planning
+- GET `/plan/coverage`: returns predicted counts per class for the next 10 minutes (sum of per‑spec predictions)
+- GET `/plan/specs`: returns ranked `spec_ids` and optional `spec_predictions` per `spec_id`
+
+### Export
+- POST `/export/hf`: exports the accumulated samples to a HuggingFace dataset repository
 
 

@@ -153,6 +153,20 @@ GET /plan/coverage?session_id=session_abc123
 GET /plan/specs?session_id=session_abc123&class_name=positive
 ```
 
+Response:
+```json
+{
+  "spec_ids": ["positive|formal|0", "positive|casual|0"],
+  "spec_predictions": {
+    "positive|formal|0": 2,
+    "positive|casual|0": 0
+  }
+}
+```
+
+Notes:
+- `spec_predictions` may be omitted when predictions are unavailable. Clients should fallback to session spec order.
+
 #### 5. Export to HuggingFace
 ```http
 POST /export/hf
@@ -253,6 +267,9 @@ This service uses **KumoRFM** (Kumo's Foundation Model), not the enterprise Kumo
 - No cloud table uploads are performed
 - The API key format and endpoints differ from enterprise Kumo
 - RFM is optimized for smaller datasets and real-time predictions
+
+### Temporal Window Requirements
+- Short-horizon predictions (e.g., 10 minutes) require a history window. The service spreads `samples.ts` over the last hour to satisfy this window. If predictions are not available, endpoints return 200 with fallback values and the UI uses safe defaults.
 
 ### Architecture Compatibility
 KumoRFM currently supports:

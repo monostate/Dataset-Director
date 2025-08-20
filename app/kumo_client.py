@@ -102,7 +102,8 @@ class KumoClient:
         self,
         session_id: str,
         specs: List[Dict[str, Any]],
-        targets: List[Dict[str, Any]]
+        targets: List[Dict[str, Any]],
+        classes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Store initial table data in Redis for a session.
@@ -129,6 +130,17 @@ class KumoClient:
             if self._store_data(targets_key, targets, ttl=7200):
                 tables[f"targets_{session_id}"] = {"count": len(targets), "stored": True}
                 logger.info(f"Stored {len(targets)} targets in Redis")
+
+            # Store classes in Redis (derived if not provided)
+            if classes is None:
+                try:
+                    classes = sorted(list({t.get('class') for t in targets if t.get('class')}))
+                except Exception:
+                    classes = []
+            classes_key = f"table:classes:{session_id}"
+            if self._store_data(classes_key, [{"class": c} for c in (classes or [])], ttl=7200):
+                tables[f"classes_{session_id}"] = {"count": len(classes or []), "stored": True}
+                logger.info(f"Stored {len(classes or [])} classes in Redis")
 
             # Initialize empty samples list in Redis
             samples_key = f"table:samples:{session_id}"
@@ -206,13 +218,33 @@ class KumoClient:
                     if 'ts' in samples_df.columns:
                         samples_df['ts'] = pd.to_datetime(samples_df['ts'])
 
+                    # Ensure uncertainty columns exist (fill NaNs)
+                    for col in ["avg_logprob", "perplexity", "low_conf_tokens", "max_entropy"]:
+                        if col not in samples_df.columns:
+                            samples_df[col] = None
                     samples_table = rfm.LocalTable(
                         samples_df,
-                        name=f"samples_{session_id}",
+                        name="samples",
                         primary_key="sample_id",
                         time_column="ts"
                     ).infer_metadata()
-                    tables[f"samples_{session_id}"] = samples_table
+                    # Explicit semantic types for IDs and categories
+                    try:
+                        if 'sample_id' in samples_table.columns:
+                            samples_table['sample_id'].stype = "ID"
+                        if 'spec_id' in samples_table.columns:
+                            samples_table['spec_id'].stype = "ID"
+                        if 'class' in samples_table.columns:
+                            samples_table['class'].stype = "categorical"
+                        if 'style' in samples_table.columns:
+                            samples_table['style'].stype = "categorical"
+                        if 'negation' in samples_table.columns:
+                            samples_table['negation'].stype = "categorical"
+                        if 'text' in samples_table.columns:
+                            samples_table['text'].stype = "text"
+                    except Exception:
+                        pass
+                    tables["samples"] = samples_table
                     logger.info(f"Created LocalTable for samples with {len(samples_df)} rows")
 
             # Get specs from Redis
@@ -223,10 +255,22 @@ class KumoClient:
                 if not specs_df.empty:
                     specs_table = rfm.LocalTable(
                         specs_df,
-                        name=f"specs_{session_id}",
+                        name="specs",
                         primary_key="spec_id"
                     ).infer_metadata()
-                    tables[f"specs_{session_id}"] = specs_table
+                    # Explicit semantic types
+                    try:
+                        if 'spec_id' in specs_table.columns:
+                            specs_table['spec_id'].stype = "ID"
+                        if 'class' in specs_table.columns:
+                            specs_table['class'].stype = "categorical"
+                        if 'style' in specs_table.columns:
+                            specs_table['style'].stype = "categorical"
+                        if 'negation' in specs_table.columns:
+                            specs_table['negation'].stype = "categorical"
+                    except Exception:
+                        pass
+                    tables["specs"] = specs_table
                     logger.info(f"Created LocalTable for specs with {len(specs_df)} rows")
 
             # Get targets from Redis
@@ -238,13 +282,30 @@ class KumoClient:
                     # Targets table doesn't need a primary key - it's linked via spec_id
                     targets_table = rfm.LocalTable(
                         targets_df,
-                        name=f"targets_{session_id}"
+                        name="targets"
                     ).infer_metadata()
-                    # Set spec_id as ID type for linking
-                    if 'spec_id' in targets_table.columns:
-                        targets_table['spec_id'].stype = "ID"
-                    tables[f"targets_{session_id}"] = targets_table
+                    # Use class as ID type for linking/filtering
+                    try:
+                        if 'class' in targets_table.columns:
+                            targets_table['class'].stype = "ID"
+                    except Exception:
+                        pass
+                    tables["targets"] = targets_table
                     logger.info(f"Created LocalTable for targets with {len(targets_df)} rows")
+
+            # Get classes from Redis
+            classes_key = f"table:classes:{session_id}"
+            classes_data = self._get_data(classes_key)
+            if classes_data:
+                classes_df = pd.DataFrame(classes_data)
+                if not classes_df.empty and 'class' in classes_df.columns:
+                    classes_table = rfm.LocalTable(
+                        classes_df,
+                        name="classes",
+                        primary_key="class"
+                    ).infer_metadata()
+                    tables["classes"] = classes_table
+                    logger.info(f"Created LocalTable for classes with {len(classes_df)} rows")
 
             return tables if tables else None
 

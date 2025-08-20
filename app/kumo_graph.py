@@ -46,13 +46,10 @@ def build_graph(
         specs_table = None
         targets_table = None
 
-        for name, table in local_tables.items():
-            if "samples" in name:
-                samples_table = table
-            elif "specs" in name:
-                specs_table = table
-            elif "targets" in name:
-                targets_table = table
+        # Tables are now canonical names
+        samples_table = local_tables.get("samples")
+        specs_table = local_tables.get("specs")
+        targets_table = local_tables.get("targets")
 
         # Add links between tables
         if samples_table and specs_table:
@@ -66,18 +63,29 @@ def build_graph(
                 logger.info(f"Linked {samples_table.name} to {specs_table.name}")
             except Exception as e:
                 logger.warning(f"Could not link samples to specs: {e}")
-
-        if targets_table and specs_table:
-            # Link targets to specs via spec_id
+        # Link specs to classes via class (FK on specs.class -> PK on classes.class)
+        classes_table = local_tables.get("classes")
+        if specs_table and classes_table:
             try:
                 graph.link(
-                    src_table=targets_table.name,
-                    fkey="spec_id",
-                    dst_table=specs_table.name
+                    src_table=specs_table.name,
+                    fkey="class",
+                    dst_table=classes_table.name,
                 )
-                logger.info(f"Linked {targets_table.name} to {specs_table.name}")
+                logger.info(f"Linked {specs_table.name} to {classes_table.name}")
             except Exception as e:
-                logger.warning(f"Could not link targets to specs: {e}")
+                logger.warning(f"Could not link specs to classes: {e}")
+        # Also link samples directly to classes via class for class-level queries
+        if samples_table and classes_table:
+            try:
+                graph.link(
+                    src_table=samples_table.name,
+                    fkey="class",
+                    dst_table=classes_table.name,
+                )
+                logger.info(f"Linked {samples_table.name} to {classes_table.name} by class")
+            except Exception as e:
+                logger.warning(f"Could not link samples to classes: {e}")
 
         logger.info(f"Built LocalGraph with {len(table_list)} tables")
         return graph

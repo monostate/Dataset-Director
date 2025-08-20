@@ -6,6 +6,7 @@ Builds PQL queries and runs predictions via KumoRFM.
 import logging
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -36,11 +37,13 @@ class PQLType(Enum):
 
 # PQL Templates - adjusted for KumoRFM syntax
 PQL_TEMPLATES = {
+    # Use canonical table names and PQL syntax with FOR on a non-PK column
     PQLType.COVERAGE: """PREDICT COUNT(samples.*, 0, 10, minutes)
-FOR targets.class = '{class_name}'""",
+FOR specs.class = '{class_name}'""",
 
-    PQLType.SPECS: """PREDICT LIST_DISTINCT(specs.spec_id, 0, 1, minutes)
-FOR targets.class = '{class_name}'""",
+    # Non-temporal spec recommendation to avoid time-column requirement on specs
+    PQLType.SPECS: """PREDICT specs.spec_id
+FOR classes.class = '{class_name}'""",
 
     PQLType.QUALITY: """PREDICT AVG(runs.metric_f1, 0, 1, minutes)
 FOR specs.spec_id = '{spec_id}'"""
@@ -203,6 +206,62 @@ def run_pql_prediction(
         return run_pql_with_predictive_query(graph, pql)
 
 
+def run_pql_with_predictive_query_and_anchor(
+    graph: Graph,
+    pql: str,
+    anchor_time: Optional[datetime],
+) -> Any:
+    """
+    Run PQL using PredictiveQuery and set a specific anchor_time when possible.
+    Falls back to run_pql_with_rfm on failure.
+    """
+    if not KUMO_AVAILABLE or not PredictiveQuery:
+        logger.warning("PredictiveQuery not available; falling back to RFM")
+        return run_pql_with_rfm(graph, pql, evaluate=False)
+
+    try:
+        pquery = PredictiveQuery(graph=graph, query=pql)
+        try:
+            pquery.validate(verbose=True)
+        except Exception as ve:
+            logger.warning(f"PredictiveQuery validate() warning: {ve}")
+
+        plan = None
+        try:
+            plan = pquery.suggest_prediction_table_plan()
+        except Exception as pe:
+            logger.warning(f"suggest_prediction_table_plan unavailable: {pe}")
+
+        # Set anchor_time if the plan supports it
+        if plan is not None and anchor_time is not None:
+            try:
+                iso_anchor = anchor_time.isoformat()
+                setattr(plan, 'anchor_time', iso_anchor)
+            except Exception as ae:
+                logger.warning(f"Failed to set anchor_time on plan: {ae}")
+
+        # Generate prediction table
+        try:
+            if plan is not None:
+                pred_table = pquery.generate_prediction_table(plan)
+            else:
+                pred_table = pquery.generate_prediction_table()
+        except Exception as ge:
+            logger.warning(f"generate_prediction_table failed ({ge}), retry without plan")
+            pred_table = pquery.generate_prediction_table()
+
+        # Predict
+        try:
+            result_df = pquery.predict(pred_table)
+        except TypeError:
+            result_df = pquery.predict()
+
+        return _process_rfm_result(pql, result_df)
+    except Exception as e:
+        logger.error(f"PredictiveQuery with anchor failed: {e}")
+        return run_pql_with_rfm(graph, pql, evaluate=False)
+
+
 def _process_rfm_result(pql: str, result_df: Any) -> Any:
     """
     Process RFM result DataFrame to match API contract.
@@ -221,23 +280,52 @@ def _process_rfm_result(pql: str, result_df: Any) -> Any:
 
     # Determine query type and extract appropriate value
     if "COUNT(samples.*" in pql:
-        # Coverage query - extract count as integer
+        # Coverage query - robustly extract a numeric value from the first row
         if isinstance(result_df, pd.DataFrame) and len(result_df) > 0:
-            # RFM returns probability or count in second column
-            value = result_df.iloc[0, 1] if result_df.shape[1] > 1 else result_df.iloc[0, 0]
-            return int(value) if not pd.isna(value) else 0
+            row0 = result_df.iloc[0]
+            # 1) Prefer numeric columns
+            for col in result_df.columns:
+                try:
+                    if pd.api.types.is_numeric_dtype(result_df[col]):
+                        val = row0[col]
+                        if not pd.isna(val):
+                            return int(val)
+                except Exception:
+                    continue
+            # 2) Try to coerce any cell to float
+            for col in result_df.columns:
+                try:
+                    val = float(row0[col])
+                    if not pd.isna(val):
+                        return int(val)
+                except Exception:
+                    continue
+            return 0
         return 0
 
-    elif "LIST_DISTINCT(specs.spec_id" in pql:
+    elif ("LIST_DISTINCT(specs.spec_id" in pql) or ("PREDICT specs.spec_id" in pql):
         # Specs query - extract list of spec IDs
-        if isinstance(result_df, pd.DataFrame):
-            # RFM returns list in second column or as rows
-            if result_df.shape[1] > 1:
-                spec_list = result_df.iloc[0, 1]
-                if isinstance(spec_list, list):
-                    return spec_list
-            # Try to extract from rows
-            return result_df.iloc[:, 0].tolist() if len(result_df) > 0 else []
+        if isinstance(result_df, pd.DataFrame) and len(result_df) > 0:
+            # Try typical columns first
+            for candidate in ["spec_id", "specs.spec_id", "value"]:
+                if candidate in result_df.columns:
+                    try:
+                        vals = result_df[candidate].dropna().tolist()
+                        # Flatten if nested lists
+                        out = []
+                        for v in vals:
+                            if isinstance(v, list):
+                                out.extend(v)
+                            else:
+                                out.append(v)
+                        return [str(x) for x in out]
+                    except Exception:
+                        pass
+            # Fallback: use first column
+            try:
+                return [str(x) for x in result_df.iloc[:, 0].dropna().tolist()]
+            except Exception:
+                return []
         return []
 
     elif "AVG(runs.metric_f1" in pql:

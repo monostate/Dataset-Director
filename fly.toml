@@ -1,7 +1,7 @@
 # Fly.io deployment configuration for Vibe Data Director
 
-app = "your-app-name"  # Replace with your app name
-primary_region = "iad"  # US East (Virginia) - change as needed
+app = "vibe-your-way"  # Replace with your app name
+primary_region = "sjc"  # US West (San Jose, CA) - changed to avoid host issues
 kill_signal = "SIGINT"
 kill_timeout = 5
 
@@ -11,7 +11,7 @@ kill_timeout = 5
 [env]
   PORT = "8080"
   PYTHONUNBUFFERED = "1"
-  CORS_ORIGINS = "https://yourdomain.com"  # Update with your production domain
+  CORS_ORIGINS = "https://yoursite.com"  # Update with your production domain
 
 [experimental]
   auto_rollback = true
