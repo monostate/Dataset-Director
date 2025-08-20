@@ -37,7 +37,9 @@ class PQLType(Enum):
 
 # PQL Templates - adjusted for KumoRFM syntax
 PQL_TEMPLATES = {
-    # Use canonical table names and PQL syntax with FOR on a non-PK column
+    # Coverage: Predicts sample count for next 10 minutes
+    # PREDICT COUNT(table.*, start_time, end_time, time_unit)
+    # This asks: "How many samples will we have in the next 10 minutes?"
     PQLType.COVERAGE: """PREDICT COUNT(samples.*, 0, 10, minutes)
 FOR specs.class = '{class_name}'""",
 
@@ -282,24 +284,39 @@ def _process_rfm_result(pql: str, result_df: Any) -> Any:
     if "COUNT(samples.*" in pql:
         # Coverage query - robustly extract a numeric value from the first row
         if isinstance(result_df, pd.DataFrame) and len(result_df) > 0:
+            # Log the DataFrame structure for debugging
+            logger.info(f"RFM result columns: {list(result_df.columns)}")
+            logger.info(f"RFM result shape: {result_df.shape}")
+            logger.info(f"RFM result first row: {result_df.iloc[0].to_dict()}")
+            
             row0 = result_df.iloc[0]
-            # 1) Prefer numeric columns
+            
+            # Look for specific count-related columns first
+            count_columns = ['count', 'COUNT', 'prediction', 'predicted_count', 'result']
+            for col in result_df.columns:
+                if any(count_col.lower() in col.lower() for count_col in count_columns):
+                    try:
+                        val = float(row0[col])
+                        if not pd.isna(val):
+                            # Sanity check: if value is unreasonably large (> 1 million), it's probably wrong
+                            if val > 1000000:
+                                logger.warning(f"Suspiciously large count value {val} in column {col}, likely a timestamp")
+                                continue
+                            return int(val)
+                    except Exception:
+                        continue
+            
+            # Fallback: look for small numeric values (< 100000) which are more likely to be counts
             for col in result_df.columns:
                 try:
                     if pd.api.types.is_numeric_dtype(result_df[col]):
                         val = row0[col]
-                        if not pd.isna(val):
+                        if not pd.isna(val) and val < 100000:  # Reasonable count threshold
                             return int(val)
                 except Exception:
                     continue
-            # 2) Try to coerce any cell to float
-            for col in result_df.columns:
-                try:
-                    val = float(row0[col])
-                    if not pd.isna(val):
-                        return int(val)
-                except Exception:
-                    continue
+                    
+            logger.warning("Could not find reasonable count value in RFM result")
             return 0
         return 0
 
