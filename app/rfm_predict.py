@@ -117,18 +117,34 @@ def run_pql_with_rfm(
 
     try:
         # Initialize KumoRFM
+        logger.info(f"Initializing KumoRFM with graph type: {type(graph).__name__}")
+        logger.info(f"Graph details: {graph.__class__.__module__}.{graph.__class__.__name__}")
         rfm = KumoRFM(graph=graph)
+        logger.info(f"KumoRFM initialized successfully")
 
         if evaluate:
             # Run evaluation
             pql_eval = f"EVALUATE {pql}"
+            logger.info(f"Running evaluation with PQL: {pql_eval}")
             metrics = rfm.evaluate(pql_eval)
             logger.info(f"RFM evaluation metrics: {metrics}")
             return metrics
         else:
             # Run prediction - returns DataFrame
+            logger.info(f"Running prediction with PQL: {pql}")
             result_df = rfm.predict(pql)
-            logger.info(f"RFM prediction result: {result_df}")
+            
+            # Log everything about the result
+            logger.info(f"RFM predict() returned type: {type(result_df)}")
+            if hasattr(result_df, 'shape'):
+                logger.info(f"Result shape: {result_df.shape}")
+            if hasattr(result_df, 'columns'):
+                logger.info(f"Result columns: {list(result_df.columns)}")
+            if hasattr(result_df, 'dtypes'):
+                logger.info(f"Column dtypes: {result_df.dtypes.to_dict()}")
+            if hasattr(result_df, 'head'):
+                logger.info(f"First 5 rows:\n{result_df.head()}")
+            logger.info(f"Full result_df: {result_df}")
 
             # Process result based on query type
             return _process_rfm_result(pql, result_df)
@@ -157,6 +173,11 @@ def run_pql_with_predictive_query(
     if not KUMO_AVAILABLE or not PredictiveQuery:
         logger.warning("PredictiveQuery not available, returning stub")
         return None
+    
+    # Check if this is a LocalGraph (which doesn't support save)
+    if graph.__class__.__name__ == 'LocalGraph':
+        logger.info("Using LocalGraph - bypassing PredictiveQuery, using KumoRFM directly")
+        return run_pql_with_rfm(graph, pql, evaluate=False)
 
     try:
         # Create PredictiveQuery
@@ -197,15 +218,27 @@ def run_pql_prediction(
     Returns:
         Prediction result (format depends on query type)
     """
-    logger.info("Running PQL prediction")
+    logger.info(f"===== START PQL PREDICTION =====")
+    logger.info(f"Graph type: {type(graph).__name__}")
+    logger.info(f"Graph module: {graph.__class__.__module__}")
+    logger.info(f"PQL query: {pql}")
+    logger.info(f"Use RFM: {use_rfm}")
+    logger.info(f"Parameters: {parameters}")
 
     # Note: PQL already has literal values embedded (no placeholders)
     # Parameters are ignored for KumoRFM since we use literal values
 
     if use_rfm:
-        return run_pql_with_rfm(graph, pql, evaluate=False)
+        logger.info("Taking RFM path (run_pql_with_rfm)")
+        result = run_pql_with_rfm(graph, pql, evaluate=False)
     else:
-        return run_pql_with_predictive_query(graph, pql)
+        logger.info("Taking PredictiveQuery path")
+        result = run_pql_with_predictive_query(graph, pql)
+    
+    logger.info(f"Final result type: {type(result)}")
+    logger.info(f"Final result value: {result}")
+    logger.info(f"===== END PQL PREDICTION =====")
+    return result
 
 
 def run_pql_with_predictive_query_and_anchor(
@@ -219,6 +252,12 @@ def run_pql_with_predictive_query_and_anchor(
     """
     if not KUMO_AVAILABLE or not PredictiveQuery:
         logger.warning("PredictiveQuery not available; falling back to RFM")
+        return run_pql_with_rfm(graph, pql, evaluate=False)
+    
+    # Check if this is a LocalGraph (which doesn't support save)
+    # LocalGraph is from experimental.rfm, regular Graph is from kumoai
+    if graph.__class__.__name__ == 'LocalGraph':
+        logger.info("Using LocalGraph - bypassing PredictiveQuery, using KumoRFM directly")
         return run_pql_with_rfm(graph, pql, evaluate=False)
 
     try:
@@ -281,42 +320,51 @@ def _process_rfm_result(pql: str, result_df: Any) -> Any:
         return _get_stub_result(pql, {})
 
     # Determine query type and extract appropriate value
+    logger.info(f"Processing RFM result for PQL type: {pql[:50]}...")
     if "COUNT(samples.*" in pql:
-        # Coverage query - robustly extract a numeric value from the first row
+        # Coverage query - extract numeric value from first row
         if isinstance(result_df, pd.DataFrame) and len(result_df) > 0:
-            # Log the DataFrame structure for debugging
-            logger.info(f"RFM result columns: {list(result_df.columns)}")
-            logger.info(f"RFM result shape: {result_df.shape}")
-            logger.info(f"RFM result first row: {result_df.iloc[0].to_dict()}")
+            # Log what Kumo actually returned
+            logger.info(f"Processing COUNT query result")
+            logger.info(f"RFM DataFrame columns: {list(result_df.columns)}")
+            logger.info(f"RFM DataFrame shape: {result_df.shape}")
+            logger.info(f"RFM DataFrame first row as dict: {result_df.iloc[0].to_dict()}")
+            logger.info(f"RFM DataFrame dtypes: {result_df.dtypes.to_dict()}")
+            logger.info(f"RFM DataFrame values:\n{result_df}")
             
             row0 = result_df.iloc[0]
             
-            # Look for specific count-related columns first
-            count_columns = ['count', 'COUNT', 'prediction', 'predicted_count', 'result']
-            for col in result_df.columns:
-                if any(count_col.lower() in col.lower() for count_col in count_columns):
-                    try:
-                        val = float(row0[col])
-                        if not pd.isna(val):
-                            # Sanity check: if value is unreasonably large (> 1 million), it's probably wrong
-                            if val > 1000000:
-                                logger.warning(f"Suspiciously large count value {val} in column {col}, likely a timestamp")
-                                continue
-                            return int(val)
-                    except Exception:
-                        continue
+            # If there's only one column and it's ANCHOR_TIMESTAMP, the prediction failed
+            if len(result_df.columns) == 1 and 'ANCHOR_TIMESTAMP' in result_df.columns:
+                logger.warning("RFM returned only ANCHOR_TIMESTAMP, no prediction. Returning 0.")
+                return 0
             
-            # Fallback: look for small numeric values (< 100000) which are more likely to be counts
+            # Look for prediction in specific columns
+            prediction_columns = ['prediction', 'predicted_count', 'count', 'result', 'value']
+            for col_pattern in prediction_columns:
+                for col in result_df.columns:
+                    if col_pattern.lower() in col.lower() and col != 'ANCHOR_TIMESTAMP':
+                        try:
+                            val = float(row0[col])
+                            if not pd.isna(val):
+                                logger.info(f"Found prediction {val} in column {col}")
+                                return int(val)
+                        except Exception:
+                            continue
+            
+            # Try any numeric column that's not ANCHOR_TIMESTAMP
             for col in result_df.columns:
+                if col == 'ANCHOR_TIMESTAMP':
+                    continue
                 try:
-                    if pd.api.types.is_numeric_dtype(result_df[col]):
-                        val = row0[col]
-                        if not pd.isna(val) and val < 100000:  # Reasonable count threshold
-                            return int(val)
+                    val = float(row0[col])
+                    if not pd.isna(val):
+                        logger.info(f"Using value {val} from column {col}")
+                        return int(val)
                 except Exception:
                     continue
-                    
-            logger.warning("Could not find reasonable count value in RFM result")
+            
+            logger.warning("No prediction value found in RFM result")
             return 0
         return 0
 

@@ -37,9 +37,20 @@ def build_graph(
     try:
         # Extract the tables
         table_list = list(local_tables.values())
+        logger.info(f"Building LocalGraph with {len(table_list)} tables")
+        for name, table in local_tables.items():
+            logger.info(f"  Table '{name}': shape={table._data.shape if hasattr(table, '_data') else 'unknown'}")
 
         # Create LocalGraph
+        logger.info("Creating LocalGraph instance...")
         graph = rfm.LocalGraph(tables=table_list)
+        logger.info(f"LocalGraph created: {graph}")
+        logger.info(f"LocalGraph type: {type(graph)}")
+        logger.info(f"LocalGraph module: {graph.__class__.__module__}")
+        
+        # Log graph attributes
+        if hasattr(graph, '__dict__'):
+            logger.info(f"LocalGraph attributes: {list(graph.__dict__.keys())}")
 
         # Find samples, specs, and targets tables
         samples_table = None
@@ -55,12 +66,16 @@ def build_graph(
         if samples_table and specs_table:
             # Link samples to specs via spec_id
             try:
+                logger.info(f"Linking {samples_table.name} -> {specs_table.name} via spec_id")
+                logger.info(f"  Samples columns: {samples_table._data.columns.tolist() if hasattr(samples_table, '_data') else 'unknown'}")
+                logger.info(f"  Specs columns: {specs_table._data.columns.tolist() if hasattr(specs_table, '_data') else 'unknown'}")
+                
                 graph.link(
                     src_table=samples_table.name,
                     fkey="spec_id",
                     dst_table=specs_table.name
                 )
-                logger.info(f"Linked {samples_table.name} to {specs_table.name}")
+                logger.info(f"✓ Successfully linked {samples_table.name} to {specs_table.name}")
             except Exception as e:
                 logger.warning(f"Could not link samples to specs: {e}")
         # Link specs to classes via class (FK on specs.class -> PK on classes.class)
